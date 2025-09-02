@@ -1,1 +1,184 @@
 
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
+
+/**
+ * @title Split Payment dApp
+ * @dev A smart contract for automatically splitting payments among multiple recipients
+ * @author Split Payment Team
+ */
+contract Project {
+    // Struct to store payment split information
+    struct PaymentSplit {
+        address[] recipients;
+        uint256[] percentages;
+        uint256 totalReceived;
+        bool isActive;
+        string description;
+    }
+    
+    // State variables
+    mapping(uint256 => PaymentSplit) public paymentSplits;
+    mapping(address => uint256[]) public userSplits;
+    uint256 public splitCounter;
+    
+    // Events
+    event SplitCreated(uint256 indexed splitId, address indexed creator, address[] recipients, uint256[] percentages);
+    event PaymentReceived(uint256 indexed splitId, address indexed sender, uint256 amount);
+    event PaymentDistributed(uint256 indexed splitId, address indexed recipient, uint256 amount);
+    event SplitDeactivated(uint256 indexed splitId);
+    
+    // Modifiers
+    modifier validSplitId(uint256 _splitId) {
+        require(_splitId < splitCounter, "Invalid split ID");
+        require(paymentSplits[_splitId].isActive, "Split is not active");
+        _;
+    }
+    
+    modifier onlyRecipient(uint256 _splitId) {
+        bool isRecipient = false;
+        for (uint i = 0; i < paymentSplits[_splitId].recipients.length; i++) {
+            if (paymentSplits[_splitId].recipients[i] == msg.sender) {
+                isRecipient = true;
+                break;
+            }
+        }
+        require(isRecipient, "Only recipients can perform this action");
+        _;
+    }
+    
+    /**
+     * @dev Creates a new payment split configuration
+     * @param _recipients Array of recipient addresses
+     * @param _percentages Array of percentage allocations (should sum to 100)
+     * @param _description Description of the payment split
+     * @return splitId The ID of the created split
+     */
+    function createSplit(
+        address[] memory _recipients,
+        uint256[] memory _percentages,
+        string memory _description
+    ) external returns (uint256) {
+        require(_recipients.length > 0, "At least one recipient required");
+        require(_recipients.length == _percentages.length, "Recipients and percentages length mismatch");
+        require(_recipients.length <= 10, "Maximum 10 recipients allowed");
+        
+        // Validate percentages sum to 100
+        uint256 totalPercentage = 0;
+        for (uint i = 0; i < _percentages.length; i++) {
+            require(_percentages[i] > 0, "Percentage must be greater than 0");
+            require(_recipients[i] != address(0), "Invalid recipient address");
+            totalPercentage += _percentages[i];
+        }
+        require(totalPercentage == 100, "Percentages must sum to 100");
+        
+        // Create new split
+        uint256 splitId = splitCounter;
+        PaymentSplit storage newSplit = paymentSplits[splitId];
+        newSplit.recipients = _recipients;
+        newSplit.percentages = _percentages;
+        newSplit.totalReceived = 0;
+        newSplit.isActive = true;
+        newSplit.description = _description;
+        
+        // Add to user's splits for each recipient
+        for (uint i = 0; i < _recipients.length; i++) {
+            userSplits[_recipients[i]].push(splitId);
+        }
+        
+        splitCounter++;
+        
+        emit SplitCreated(splitId, msg.sender, _recipients, _percentages);
+        return splitId;
+    }
+    
+    /**
+     * @dev Receives payment and automatically distributes it according to split percentages
+     * @param _splitId The ID of the split to receive payment for
+     */
+    function receivePayment(uint256 _splitId) external payable validSplitId(_splitId) {
+        require(msg.value > 0, "Payment amount must be greater than 0");
+        
+        PaymentSplit storage split = paymentSplits[_splitId];
+        split.totalReceived += msg.value;
+        
+        emit PaymentReceived(_splitId, msg.sender, msg.value);
+        
+        // Distribute payment immediately
+        _distributePayment(_splitId, msg.value);
+    }
+    
+    /**
+     * @dev Internal function to distribute payment among recipients
+     * @param _splitId The ID of the split
+     * @param _amount The amount to distribute
+     */
+    function _distributePayment(uint256 _splitId, uint256 _amount) internal {
+        PaymentSplit storage split = paymentSplits[_splitId];
+        
+        for (uint i = 0; i < split.recipients.length; i++) {
+            uint256 recipientAmount = (_amount * split.percentages[i]) / 100;
+            
+            // Transfer to recipient
+            (bool success, ) = payable(split.recipients[i]).call{value: recipientAmount}("");
+            require(success, "Transfer failed");
+            
+            emit PaymentDistributed(_splitId, split.recipients[i], recipientAmount);
+        }
+    }
+    
+    /**
+     * @dev Deactivates a payment split (only callable by recipients)
+     * @param _splitId The ID of the split to deactivate
+     */
+    function deactivateSplit(uint256 _splitId) external validSplitId(_splitId) onlyRecipient(_splitId) {
+        paymentSplits[_splitId].isActive = false;
+        emit SplitDeactivated(_splitId);
+    }
+    
+    // View functions
+    
+    /**
+     * @dev Gets split information
+     * @param _splitId The ID of the split
+     * @return recipients Array of recipient addresses
+     * @return percentages Array of percentage allocations
+     * @return totalReceived Total amount received by this split
+     * @return isActive Whether the split is active
+     * @return description Description of the split
+     */
+    function getSplitInfo(uint256 _splitId) external view returns (
+        address[] memory recipients,
+        uint256[] memory percentages,
+        uint256 totalReceived,
+        bool isActive,
+        string memory description
+    ) {
+        require(_splitId < splitCounter, "Invalid split ID");
+        PaymentSplit storage split = paymentSplits[_splitId];
+        return (
+            split.recipients,
+            split.percentages,
+            split.totalReceived,
+            split.isActive,
+            split.description
+        );
+    }
+    
+    /**
+     * @dev Gets all split IDs for a user
+     * @param _user The user address
+     * @return Array of split IDs the user is involved in
+     */
+    function getUserSplits(address _user) external view returns (uint256[] memory) {
+        return userSplits[_user];
+    }
+    
+    /**
+     * @dev Gets the total number of splits created
+     * @return The total number of splits
+     */
+    function getTotalSplits() external view returns (uint256) {
+        return splitCounter;
+    }
+}
